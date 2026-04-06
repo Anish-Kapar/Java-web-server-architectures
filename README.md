@@ -13,15 +13,28 @@
 
 This project implements **three Java socket-based server architectures** to demonstrate how different concurrency models handle real-world load.
 
-Each server is stress-tested with **10,000 requests at ~1,000 req/sec** using Apache JMeter to measure throughput, response time, latency, and scalability.
+Each server is stress-tested with **600,000 requests over 60 seconds (~10,000 req/sec)** using Apache JMeter to measure throughput, response time, latency, and scalability.
 
 ---
 
-## 🏛️ Architectures
+## 🧪 JMeter Test Configuration
+
+| Parameter | Value |
+|---|---|
+| 🛠️ Tool | Apache JMeter 5.6.2 |
+| 📦 Total Requests | 600,000 |
+| ⚡ Simulated Load | ~10,000 requests/sec |
+| ⏱️ Ramp-up Period | 60 seconds |
+| 🌐 Protocol | TCP Socket |
+| 🖥️ Server Host | localhost:8010 |
+
+---
+
+## 🏛️ Architectures & Results
 
 ### 🔴 1. Single-Threaded Server
 
-Processes one client request at a time. All requests are handled **sequentially** on a single thread — no concurrency at all.
+Processes one client request at a time. All requests are handled **sequentially** on a single thread — zero concurrency.
 
 ```
 Client → ServerSocket → Single Thread → Handle Request → Respond
@@ -29,146 +42,129 @@ Client → ServerSocket → Single Thread → Handle Request → Respond
                    (next client waits here)
 ```
 
-**⚙️ How it works:**
-- Server opens port and calls `accept()` in a loop
-- Each accepted client is handled **before** the next one is accepted
-- If processing is slow → every other client waits in queue
-
-**Characteristics:**
+**⚙️ Characteristics:**
 - ✅ Simple to implement and debug
 - ⚠️ Requests queue up — each waits for the previous to finish
 - ❌ Completely blocks under concurrent load
 - ❌ Not suitable for production
 
 
-**📊 JMeter Results — 10,000 requests @ 1,000 req/sec:**
+**📊 JMeter Results — 60,000 requests @ ~1,000 req/sec:**
 
 | Metric | Value |
 |--------|-------|
-| 📦 Total Samples | 11,000 requests |
-| 🚀 Throughput | ~85 req/sec (~5,154 / min) |
+| 📦 Total Samples | ~11,000 |
+| 🚀 Throughput | **~85 req/sec** |
 | ⏱️ Average Response Time | **631 ms** |
 | 📉 Median Response Time | **24 ms** |
-| 📐 Std. Deviation | **1,329 ms** (very inconsistent) |
-| ✅ Successful Responses | Partial (many connections refused) |
-| 💾 Response Size | ~23 bytes per response |
-| 🔎 Bottleneck | 1 thread handling 1,000 req/sec load |
+| 📐 Std. Deviation | **1,329 ms** |
+| ❌ Errors | Many (connection refused + timeouts) |
+| 💾 Response Size | 22 bytes |
 
-> ⚠️ **Key insight:** Server could only handle ~85 req/sec out of 1,000 req/sec being sent. The high deviation (1,329 ms) shows extremely inconsistent performance — some requests were fast (24ms median) but others timed out completely.
+> ⚠️ **What happened:** Server processed only ~85 req/sec out of 1,000 req/sec being sent. The massive deviation of 1,329ms shows extremely unpredictable performance — some requests were fast but most timed out waiting in queue. Eventually the server threw `SocketTimeoutException` repeatedly as load overwhelmed the single thread.
 
 ---
 
 ### 🟡 2. Multi-Threaded Server
 
-Spawns a **new thread for every incoming client request**, enabling true concurrency. Multiple clients are served simultaneously.
+Spawns a **new thread for every incoming client request**, enabling true concurrency.
 
 ```
-Client 1 ──→ Thread 1 ──→ Handle & Respond
-Client 2 ──→ Thread 2 ──→ Handle & Respond
-Client 3 ──→ Thread 3 ──→ Handle & Respond
-Client N ──→ Thread N ──→ Handle & Respond
+Client 1 ──→ new Thread() ──→ Handle & Respond
+Client 2 ──→ new Thread() ──→ Handle & Respond
+Client N ──→ new Thread() ──→ Handle & Respond
+  ↑
+(unbounded — 1 client = 1 new thread always)
 ```
 
-**⚙️ How it works:**
-- Server calls `accept()` → immediately spawns a `new Thread()` for that client
-- Main thread goes back to `accept()` right away
-- Each client gets its own dedicated thread
-
-**Characteristics:**
+**⚙️ Characteristics:**
 - ✅ True concurrent request handling
-- ✅ Each client gets immediate response
-- ✅ Much faster than single-threaded under load
-- ⚠️ 1,000 clients → 1,000 threads created simultaneously
-- ❌ Unbounded thread creation can crash JVM under extreme load
-- ❌ High memory + CPU overhead per thread
+- ✅ Each client gets an immediate thread
+- ⚠️ 10,000 req/sec → 10,000 threads spawned simultaneously
+- ❌ OS hits thread creation limit → `pthread_create failed (EAGAIN)`
+- ❌ Unbounded thread creation crashes JVM under extreme load
 
-**📊 JMeter Results — 10,000 requests @ 1,000 req/sec:**
+**📊 JMeter Results — 600,000 requests @ ~10,000 req/sec:**
 
 | Metric | Value |
 |--------|-------|
-| 📦 Total Samples | 10,000+ requests |
-| 🚀 Throughput | Significantly higher than Single-Threaded |
-| ⏱️ Average Response Time | Reduced compared to Single-Threaded |
-| 📐 Std. Deviation | Lower than Single-Threaded |
-| ✅ Successful Responses | Higher success rate |
-| 🔎 Bottleneck | Unbounded thread creation under heavy load |
+| 📦 Total Samples Processed | **~19,304** |
+| 🚀 Peak Sample Time | **0–2 ms** (while threads available) |
+| ⏱️ Average Response Time | **~190–237 ms** (after degradation) |
+| ❌ Total Errors | **2,699 failures** |
+| 💥 Crash Point | ~4,723 threads → OS limit hit |
+| 💾 Response Size | 22 bytes (0 on failed) |
+| 🔎 Failure Reason | `pthread_create failed` — OS ran out of threads |
 
-> ⚠️ **Key insight:** Big improvement over single-threaded, but under 1,000 req/sec, the JVM spawns 1,000 threads at once — this becomes a resource problem at very high concurrency.
+> ⚠️ **What happened:** Server performed brilliantly at 0–2ms while OS could create threads. Around sample ~4,723, the JVM threw `Failed to start thread "Unknown thread" - pthread_create failed (EAGAIN)` — the OS hit its maximum thread limit. From that point, new connections were rejected causing 2,699 errors out of ~19,304 attempts.
 
 ---
 
-### 🟢 3. Thread Pool Server ⭐ Recommended
+### 🟢 3. Thread Pool Server ⭐ Best Architecture
 
-Uses a **fixed pool of reusable worker threads**. Requests are queued and picked up by available threads — no overhead from creating/destroying threads per request.
+Uses a **fixed pool of 10 reusable worker threads**. Requests queue up and are served by available threads — no thread creation overhead per request.
 
 ```
 Client 1 ──→ ┐
-Client 2 ──→ ├──→ Request Queue ──→ [ Thread 1 ]──→ Respond
-Client 3 ──→ ├──→                   [ Thread 2 ]──→ Respond
-Client N ──→ ┘                      [ Thread 3 ]──→ Respond
-                                    [    ...   ]
-                                    [ Thread 10]──→ Respond
+Client 2 ──→ ├──→ BlockingQueue ──→ [ Worker Thread 1  ] ──→ Respond
+Client 3 ──→ ├──→                   [ Worker Thread 2  ] ──→ Respond
+Client N ──→ ┘                      [ Worker Thread ... ] ──→ Respond
+                                    [ Worker Thread 10 ] ──→ Respond
+                     (only 10 threads ever exist — reused forever)
 ```
 
-**⚙️ How it works (`poolSize = 10`):**
-- `Executors.newFixedThreadPool(10)` creates exactly 10 worker threads
-- Every accepted client is submitted via `threadPool.execute()`
-- If all 10 threads are busy → new clients wait in queue (not rejected)
-- Threads are **reused** — zero creation overhead per request
+**⚙️ Characteristics:**
+- ✅ Fixed 10 threads — zero thread creation per request
+- ✅ Controlled, bounded resource usage
+- ✅ Recovers gracefully after burst spikes
+- ⚠️ Queue overflows under extreme load (10,000 req/sec), causing temporary errors
+- ✅ Returns to normal after burst — unlike multi-threaded which crashes permanently
 
-**Characteristics:**
-- ✅ Controlled, bounded thread usage (max 10 threads)
-- ✅ Threads are reused — no creation/destruction overhead
-- ✅ Graceful queue management under burst load
-- ✅ Consistent and predictable performance
-- ✅ Production-ready architecture (used by Tomcat, Jetty, etc.)
-
-**📊 JMeter Results — 10,000 requests @ 1,000 req/sec:**
+**📊 JMeter Results — 600,000 requests @ ~10,000 req/sec:**
 
 | Metric | Value |
 |--------|-------|
-| 📦 Total Samples | 10,000+ requests |
-| 🚀 Throughput | Highest & most stable |
-| ⏱️ Average Response Time | Lowest & most consistent |
-| 📐 Std. Deviation | Lowest (most predictable) |
-| ✅ Successful Responses | Best success rate |
-| 🔎 Advantage | Fixed 10 threads handle all load via queue |
+| 📦 Total Samples Processed | **~26,870** |
+| 🚀 Peak Sample Time (stable phase) | **0–1 ms** |
+| ⏱️ Response Time (early ramp) | **55–62 ms** |
+| ⏱️ Average (overall) | **~3,007 ms** (includes queue overflow period) |
+| ❌ Total Errors | **3,310** (during peak burst only) |
+| 💾 Response Size | 29 bytes |
+| ♻️ Recovery | ✅ Server recovered and continued processing |
+| 🔎 Key Behaviour | Errors during overflow → auto-recovery → back to 0–1ms |
 
-> ✅ **Key insight:** With only 10 threads, this server handles the same 10,000 request load more efficiently than spawning 1,000 threads. Less memory, lower CPU overhead, better throughput consistency.
-
----
-
-## 📈 Performance Comparison
-
-| Architecture | Throughput | Avg Response Time | Std Deviation | Scalability | Thread Usage |
-|---|---|---|---|---|---|
-| 🔴 Single-Threaded | ~85 req/sec | **631 ms** | **1,329 ms** | ❌ Poor | 1 thread |
-| 🟡 Multi-Threaded | High ↑ | Moderate ↓ | Medium | ⚠️ Good | 1 thread per client |
-| 🟢 Thread Pool | Highest ↑↑ | Lowest ↓↓ | Lowest | ✅ Best | Fixed 10 threads |
+> ✅ **What happened:** Thread pool started at ~60ms during ramp-up (threads warming up), then settled to **0–1ms** as the pool stabilized. During the extreme 10,000 req/sec burst, the queue temporarily overflowed causing ~3,310 errors (samples ~11,000). **Crucially — the server recovered on its own** and continued processing at 0–1ms (samples ~13,700+), unlike multi-threaded which crashed permanently. Total samples processed (26,870) was also higher than multi-threaded (19,304).
 
 ---
 
-## 🧪 JMeter Test Setup
+## 📈 Head-to-Head Comparison
 
-| Parameter | Value |
-|---|---|
-| 🛠️ Tool | Apache JMeter |
-| 📦 Total Requests | 10,000 |
-| ⚡ Simulated Load | ~1,000 requests/sec (10 sec ramp) |
-| 🌐 Protocol | TCP Socket |
-| 🖥️ Server Host | localhost:8010 |
-| 📐 Metrics Tracked | Throughput, Avg Response Time, Median, Std Deviation, Latency, Connect Time, Bytes |
+| Metric | 🔴 Single-Threaded | 🟡 Multi-Threaded | 🟢 Thread Pool |
+|---|---|---|---|
+| **Samples Processed** | ~11,000 | ~19,304 | **~26,870** |
+| **Best Response Time** | 24 ms (median) | 0–2 ms | **0–1 ms** |
+| **Avg Response Time** | 631 ms | 190–237 ms | 3,007 ms* |
+| **Std Deviation** | 1,329 ms | Medium | Lowest (stable phases) |
+| **Total Errors** | Many | 2,699 | 3,310 |
+| **Crash / Recovery** | Timeouts loop | 💥 Crashed at ~4,723 threads | ✅ Recovered automatically |
+| **Thread Usage** | 1 fixed | 1 per client (unbounded) | **10 fixed (reused)** |
+| **Scalability** | ❌ Poor | ⚠️ Good until OS limit | ✅ Best |
+| **Production Ready** | ❌ No | ❌ No | ✅ Yes |
 
-### 📋 JMeter Metrics Explained
+> *Thread Pool's higher average is skewed by the queue overflow burst period. In stable operation it runs at 0–1ms — the lowest of all three.
+
+---
+
+## 📋 JMeter Metrics — What They Mean
 
 | Metric | What it means |
 |---|---|
-| **Sample Time (ms)** | Total time server took to respond |
-| **Latency** | Time from request sent → first byte received |
+| **Sample Time (ms)** | Total time from request sent → response fully received |
+| **Latency** | Time from request sent → first byte of response received |
 | **Connect Time** | Time to establish the TCP socket connection |
 | **Throughput** | Requests successfully handled per second |
-| **Median** | Response time for the middle 50% of requests (more reliable than average) |
-| **Std Deviation** | How inconsistent the response times are — lower is better |
+| **Std Deviation** | How inconsistent response times are — lower = more predictable |
+| **Bytes = 0** | Server rejected/dropped the connection — failed request |
 
 ---
 
@@ -176,9 +172,9 @@ Client N ──→ ┘                      [ Thread 3 ]──→ Respond
 
 | | Architecture | Verdict |
 |---|---|---|
-| 🔴 | **Single-Threaded** | Simple but not scalable. Only 85 req/sec under 1,000 req/sec load. High deviation (1,329ms) means extremely unpredictable performance. |
-| 🟡 | **Multi-Threaded** | Good concurrency improvement but dangerous under heavy load — unbounded thread creation can exhaust JVM memory. |
-| 🟢 | **Thread Pool** | Best of all three. Fixed threads + queue = production-ready, consistent, and resource-efficient. This is how real servers (Tomcat, Jetty) work. |
+| 🔴 | **Single-Threaded** | Only ~85 req/sec under 1,000 req/sec load. Std dev of 1,329ms means wildly unpredictable performance. Not usable at any real scale. |
+| 🟡 | **Multi-Threaded** | Fast at 0–2ms initially, but **permanently crashed** at ~4,723 threads. The OS cannot keep up with unbounded thread creation. Dangerous under load. |
+| 🟢 | **Thread Pool** | Processed the most requests (26,870), ran at 0–1ms in stable phases, and **recovered automatically** after burst overflow. This is how production servers (Tomcat, Jetty, Netty) actually work. |
 
 ---
 
@@ -188,9 +184,9 @@ Client N ──→ ┘                      [ Thread 3 ]──→ Respond
 |---|---|
 | ☕ Java (Socket Programming) | Core server implementation |
 | 🧵 `Thread` / `Runnable` | Multi-threaded server |
-| 🔄 `ExecutorService` + `Executors.newFixedThreadPool()` | Thread Pool server |
-| 📊 Apache JMeter | Load & performance testing |
+| 🔄 `ExecutorService` + `Executors.newFixedThreadPool(10)` | Thread Pool server |
+| 📊 Apache JMeter 5.6.2 | Load & performance testing |
 
 ---
 
-<p align="center">Made with ❤️ using Java</p>
+<p align="center">Made with ❤️ using Java & Apache JMeter</p>
